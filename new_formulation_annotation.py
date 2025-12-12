@@ -328,7 +328,7 @@ for idx, pt in enumerate(node_pts):
     axs[1].text(
         text_pos[0],
         text_pos[1],
-        rf"$x_{{ij}}^{{{idx}}}$",
+        rf"$p_{{ij}}^{{{idx}}}$",
         color="navy",
         fontsize=16,
         weight="bold",
