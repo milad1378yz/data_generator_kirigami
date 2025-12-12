@@ -1,0 +1,15 @@
+__pycache__/
+*.gif
+*.png
+*.pdf
+.vscode/
+demo.py
+temp.py
+demo_*.py
+
+*.pkl
+
+*temp*
+*.npz
+*.npy
+*.svg
