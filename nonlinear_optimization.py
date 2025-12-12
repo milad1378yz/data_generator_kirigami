@@ -4,8 +4,8 @@
 # %%
 import numpy as np
 import matplotlib.pyplot as plt
-from Structure import *
-from Utils import *
+from kirigami.structure import *
+from kirigami.utils import *
 import scipy.optimize as scopt
 import time
 

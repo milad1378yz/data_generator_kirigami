@@ -31,22 +31,6 @@ def normalize(x):
     return x / norm(x)
 
 
-def append_row(mat, row):
-    """
-    Append a row to a matrix.
-
-    Args:
-        mat (ndarray): Input matrix of shape (m, n)
-        row (array-like): Row to append of shape (n,)
-
-    Returns:
-        ndarray: Matrix with appended row of shape (m+1, n)
-
-    Shape transition: (m, n) + (n,) -> (m+1, n)
-    """
-    return np.append(mat, [row], axis=0)
-
-
 def get_num_rows(mat):
     """
     Get the number of rows in a matrix.
@@ -90,25 +74,6 @@ def is_odd(x):
     Note: Uses x % 2 which returns True for odd numbers
     """
     return bool(x % 2)
-
-
-def rotate_90(v, ccw):
-    """
-    Rotate a 2D vector by 90 degrees.
-
-    Args:
-        v (array-like): 2D vector of shape (2,)
-        ccw (int): Direction multiplier (1 for CCW, -1 for CW)
-
-    Returns:
-        ndarray: Rotated vector of shape (2,)
-
-    Shape transition: (2,) -> (2,)
-    Mathematical operation: [x, y] -> ccw * [-y, x]
-    """
-    rotated_v = np.array((0.0, 0.0))
-    rotated_v[0], rotated_v[1] = ccw * -v[1], ccw * v[0]
-    return rotated_v
 
 
 def cyclic(x, a):
@@ -188,21 +153,6 @@ def rotation_matrix(angle):
                   [sin(θ),  cos(θ)]]
     """
     return np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
-
-
-def identity_matrix(n):
-    """
-    Create an n×n identity matrix.
-
-    Args:
-        n (int): Size of the square identity matrix
-
-    Returns:
-        ndarray: n×n identity matrix
-
-    Shape: (n, n) with 1s on diagonal, 0s elsewhere
-    """
-    return np.eye(n)
 
 
 def rotation_matrix_3d(angle):
@@ -307,29 +257,23 @@ def rotate_points(points, origin, angle):
         3. Translate back to original position
     """
 
-    if len(points.shape) == 1:
+    points = np.asarray(points, dtype=float)
+    origin = np.asarray(origin, dtype=float)
+
+    if points.ndim == 1:
         onedim = True
-        points = np.array([points])
+        points_2d = points[None, :]
     else:
         onedim = False
+        points_2d = points
 
-    num_points = len(points)
-
-    if points.shape[1] == 3:
+    if points_2d.shape[1] == 3:
         rot_mat = rotation_matrix_3d(angle)
     else:
         rot_mat = rotation_matrix(angle)
 
-    rotated_points = points - np.tile(origin, (num_points, 1))
-
-    for i, point in enumerate(rotated_points):
-        rotated_points[i] = np.array((np.matrix(rot_mat) * np.matrix(point).T).T)
-    rotated_points += np.tile(origin, (num_points, 1))
-
-    if onedim:
-        rotated_points = rotated_points[0]
-
-    return rotated_points
+    rotated_points = (points_2d - origin) @ rot_mat.T + origin
+    return rotated_points[0] if onedim else rotated_points
 
 
 def planar_cross(a, b):
@@ -398,7 +342,7 @@ def shift_points(points, shift):
     Operation: Each point[i] += shift
     """
 
-    return points + np.tile(shift, (len(points), 1))
+    return points + shift
 
 
 def plot_structure(points, quads, linkages, ax):
@@ -429,72 +373,6 @@ def plot_structure(points, quads, linkages, ax):
 
     ax.axis("off")
     ax.set_aspect("equal")
-
-
-def deployment_linkage2matrix(i, j, num_linkage_rows, num_linkage_cols):
-    """
-    Convert linkage grid coordinates to matrix row index for deployment analysis.
-
-    Args:
-        i (int): Row index in linkage grid (can be negative for boundary)
-        j (int): Column index in linkage grid (can be negative for boundary)
-        num_linkage_rows (int): Number of rows in the linkage grid
-        num_linkage_cols (int): Number of columns in the linkage grid
-
-    Returns:
-        tuple or None: (matrix_row_index, label) or None if invalid
-
-    Coordinate system:
-        - Bulk linkages: 0 ≤ i < num_rows, 0 ≤ j < num_cols
-        - Boundary linkages: Negative indices indicate boundary regions
-
-    Labels: 'bulk', 'left', 'bottom', 'right', 'top'
-    """
-
-    if 0 <= i < num_linkage_rows and 0 <= j < num_linkage_cols:  # bulk
-
-        matrix_row_ind = i * num_linkage_cols + j
-        label = "bulk"
-
-    else:
-
-        num_bulk_linkages = num_linkage_rows * num_linkage_cols
-
-        num_boundary_linkages = [
-            num_linkage_rows,
-            num_linkage_cols,
-            num_linkage_rows,
-            num_linkage_cols,
-        ]
-
-        if j == -1 and 0 <= i < num_linkage_rows:  # left
-            side_ind = 0
-            bound_ind = i
-            label = "left"
-
-        elif i == num_linkage_rows and 0 <= j < num_linkage_cols:  # bottom
-            side_ind = 1
-            bound_ind = j
-            label = "bottom"
-
-        elif j == num_linkage_cols and 0 <= i < num_linkage_rows:  # right
-            side_ind = 2
-            bound_ind = num_linkage_rows - 1 - i
-            label = "right"
-
-        elif i == -1 and 0 <= j < num_linkage_cols:  # top
-            side_ind = 3
-            bound_ind = num_linkage_cols - 1 - j
-            label = "top"
-
-        else:  # linkage DNE
-            return None
-
-        num_other_boundary_linkages = sum(num_boundary_linkages[:side_ind])
-
-        matrix_row_ind = num_bulk_linkages + num_other_boundary_linkages + bound_ind
-
-    return matrix_row_ind, label
 
 
 def _orientation2d(a, b, c):
@@ -758,5 +636,5 @@ def main():
 
     Purpose: Provides feedback when module is reloaded in interactive sessions
     """
-    print("reloading Utils")
+    print("reloading kirigami.utils")
     return

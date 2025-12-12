@@ -5,7 +5,7 @@ import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 
 from optimize_eps_shapes import _build_structure_context
-from Utils import plot_structure, rotate_points
+from kirigami.utils import plot_structure, rotate_points
 
 
 def _center_points(points: np.ndarray, phi: float) -> np.ndarray:

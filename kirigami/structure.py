@@ -1,4 +1,4 @@
-from Utils import *
+from .utils import *
 
 # Numerical stability knobs for inverse design solvers
 # If the boundary system condition number exceeds this, raise an error.

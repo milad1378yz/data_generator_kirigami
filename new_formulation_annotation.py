@@ -4,8 +4,8 @@ from collections import deque
 from matplotlib.path import Path
 import matplotlib.patches as mpatches
 
-from Structure import MatrixStructure
-from Utils import plot_structure, rotate_points
+from kirigami.structure import MatrixStructure
+from kirigami.utils import plot_structure, rotate_points
 
 
 # the pattern size

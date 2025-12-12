@@ -4,7 +4,7 @@ from typing import Dict, Iterable, List, Tuple, Optional
 
 import numpy as np
 
-from Utils import read_obj
+from kirigami.utils import read_obj
 
 
 def _point_on_segment_2d(a: np.ndarray, b: np.ndarray, p: np.ndarray, tol: float = 1e-8) -> bool:

@@ -6,8 +6,8 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 
-from Structure import MatrixStructure
-from Utils import plot_structure, find_invalid_quads, find_overlapping_quads
+from kirigami.structure import MatrixStructure
+from kirigami.utils import plot_structure, find_invalid_quads, find_overlapping_quads
 from offset_data_generator import (
     _compute_boundary_points_and_corners,
     _estimate_overlap_ratio,

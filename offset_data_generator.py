@@ -3,9 +3,8 @@ import pickle
 from matplotlib.path import Path
 from tqdm import tqdm
 
-from Structure import MatrixStructure
-
-from Utils import find_invalid_quads
+from kirigami.structure import MatrixStructure
+from kirigami.utils import find_invalid_quads
 
 
 from concurrent.futures import ThreadPoolExecutor
