@@ -31,21 +31,6 @@ def normalize(x):
     return x / norm(x)
 
 
-def get_num_rows(mat):
-    """
-    Get the number of rows in a matrix.
-
-    Args:
-        mat (ndarray): Input matrix of shape (m, n)
-
-    Returns:
-        int: Number of rows in the matrix
-
-    Shape query: (m, n) -> m
-    """
-    return mat.shape[0]
-
-
 def is_even(x):
     """
     Check if a number is even using modular arithmetic.
@@ -90,38 +75,6 @@ def cyclic(x, a):
     Shape transition: (n, ...) -> (n, ...) with elements reordered
     """
     return np.roll(x, a, axis=0)
-
-
-def parse_vertex(v):
-    """
-    Convert a vertex coordinate to OBJ file format string.
-
-    Args:
-        v (array-like): Vertex coordinates of shape (2,) or (3,)
-
-    Returns:
-        str: OBJ format vertex line with z-coordinate set to 0.0
-
-    Format: "v x y 0.0\n"
-    """
-    return "v " + " ".join([str(coord) for coord in v]) + " 0.0\n"
-
-
-def parse_face(f):
-    """
-    Convert face indices to OBJ file format string.
-
-    Args:
-        f (array-like): Face vertex indices (0-based)
-
-    Returns:
-        str: OBJ format face line with 1-based indices
-
-    Format: "f i1// i2// i3// i4//\n"
-    Note: Converts from 0-based to 1-based indexing
-    """
-    return "f " + "// ".join([str(ind + 1) for ind in f]) + "//\n"
-
 
 def empty_list_of_lists(n):
     """
@@ -560,30 +513,6 @@ def find_overlapping_quads(points, quads, tol=1e-9):
     return overlaps
 
 
-def write_obj(filename, points, quads):
-    """
-    Write geometry data to Wavefront OBJ file format.
-
-    Args:
-        filename (str): Output filename
-        points (ndarray): Vertex coordinates, shape (n, 2) or (n, 3)
-        quads (ndarray): Quad face indices, shape (m, 4)
-
-    File format:
-        - Header: "# n vertices, m faces"
-        - Vertices: "v x y 0.0" (z forced to 0.0 for 2D data)
-        - Faces: "f i1// i2// i3// i4//" (1-based indexing)
-    """
-
-    obj = open(filename, "w")
-    obj.write("# {} vertices, {} faces\n".format(get_num_rows(points), get_num_rows(quads)))
-    str_points = [parse_vertex(point) for point in points]
-    obj.writelines(str_points)
-    str_quads = [parse_face(quad) for quad in quads]
-    obj.writelines(str_quads)
-    obj.close()
-
-
 def read_obj(filename):
     """
     Read geometry data from Wavefront OBJ file format.
@@ -625,16 +554,3 @@ def read_obj(filename):
     obj.close()
 
     return np.array(points), np.array(faces)
-
-
-def main():
-    """
-    Main function for module reloading during development.
-
-    Returns:
-        None
-
-    Purpose: Provides feedback when module is reloaded in interactive sessions
-    """
-    print("reloading kirigami.utils")
-    return

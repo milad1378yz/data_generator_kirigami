@@ -570,20 +570,6 @@ class GenericStructure:
         return (R @ linkage_points.T).T + t
 
     @staticmethod
-    def rotate_linkage(layout_points, linkage_points, linkage_quads, shift_origin):
-        rotation_origin = layout_points[linkage_quads[0, 1]]
-        rotation_angle = -calculate_angle(shift_origin, rotation_origin, linkage_points[1])
-        linkage_points = rotate_points(linkage_points, shift_origin, rotation_angle)
-        return linkage_points
-
-    @staticmethod
-    def translate_linkage(layout_points, linkage_points, linkage_quads):
-        shift_origin = layout_points[linkage_quads[0, 0]]
-        shift = shift_origin - linkage_points[0]
-        linkage_points = shift_points(linkage_points, shift)
-        return linkage_points, shift_origin
-
-    @staticmethod
     def store_linkage_layout(layout_points, linkage2quad_map, linkage_index, linkage_points, quads):
         linkage_node_inds = quads[linkage2quad_map[linkage_index]].flatten()
         for k, node_index in enumerate(linkage_node_inds):
@@ -591,84 +577,6 @@ class GenericStructure:
             # earlier alignments due to numerical noise.
             if np.any(np.isnan(layout_points[node_index])):
                 layout_points[node_index] = linkage_points[k]
-
-    # computes patterns for generic (non necessarily rigid-deployable) structures
-    # if quad_gender -> CCW about hinge
-    # else -> CW about hinge
-    def generic_layout(self, toggle):
-        """
-        Deploy structure using quad-by-quad rotation method (non-rigid deployment).
-
-        Args:
-            toggle (bool): Deployment direction toggle
-                          True: Use original quad genders
-                          False: Use inverted quad genders
-
-        Returns:
-            ndarray: Deployed vertex coordinates, shape (n_vertices, 2)
-
-        Process:
-            1. Start with first quad in reference position
-            2. For each subsequent quad, rotate around shared hinge
-            3. Rotation direction determined by quad gender and toggle
-
-        Quad gender meanings:
-            - True (CCW): Counter-clockwise rotation about hinge
-            - False (CW): Clockwise rotation about hinge
-
-        Note: This method allows non-rigid deployment where structure
-              may not maintain exact edge lengths during motion
-
-        Shape transition: Reference geometry -> Deployed geometry
-        """
-
-        points = self.points
-        quads = self.quads
-        quad_genders = self.quad_genders
-        height = self.num_linkage_rows
-        width = self.num_linkage_cols
-
-        rolled_quads = np.zeros_like(quads)
-        for i, (quad, gender) in enumerate(zip(quads, quad_genders)):
-            if not gender:
-                rolled_quads[i, :] = np.roll(quad, -1)
-            else:
-                rolled_quads[i, :] = quad
-
-        layout_points = np.zeros_like(points)
-        layout_points[quads[0], :] = points[quads[0], :]
-
-        for i in range(height + 1):
-            for j in range(width + 1):
-                if i == 0 and j == 0:
-                    continue
-
-                quad_ind = i * (width + 1) + j
-                quad = rolled_quads[quad_ind]
-                quad_gender = quad_genders[quad_ind] if toggle else not quad_genders[quad_ind]
-                parent_quad_ind = (i - (j == 0)) * (width + 1) + j - 1 + (j == 0)
-                parent_quad = rolled_quads[parent_quad_ind]
-                hinge_node_ind = quad[(0 - (j == 0)) % 4]
-                if quad_gender:
-                    arm_node_ind = quad[3 - (j == 0)]
-                    target_node_ind = parent_quad[3 - (j == 0)]
-                else:
-                    arm_node_ind = quad[1 - (j == 0)]
-                    target_node_ind = parent_quad[1 - (j == 0)]
-
-                arm = points[arm_node_ind, :] - points[hinge_node_ind, :]
-                home = layout_points[target_node_ind, :] - layout_points[hinge_node_ind, :]
-                origin = layout_points[hinge_node_ind, :]
-                position = points[hinge_node_ind, :] - origin
-                angle = calculate_angle([0, 0], arm, home)
-
-                quad_points = points[quad, :]
-                quad_points = shift_points(quad_points, -position)
-                quad_points = rotate_points(quad_points, origin, angle)
-
-                layout_points[quad, :] = quad_points
-
-        return layout_points
 
     def assign_node_layers(self):
         """
@@ -709,9 +617,6 @@ class GenericStructure:
                 node_layers[linkage[1]] = 2 * is_odd(i) - 1
 
         self.node_layers = node_layers
-
-    def get_node_layer(self, node_index):
-        return self.node_layers[node_index]
 
     def assign_quad_genders(self):
         """
@@ -755,9 +660,6 @@ class GenericStructure:
                 linkage_index += 1
 
         self.quad_genders = quad_genders
-
-    def get_quad_gender(self, quad_index):
-        return self.quad_genders[quad_index]
 
     def make_hinge_contact_points(self):
         """
@@ -832,24 +734,6 @@ class GenericStructure:
         self.hinge_contact_points = hinge_contact_points
         self.hinge_parent_nodes = hinge_parent_nodes
 
-    def get_hinge_contact_points(self, quad_inds):
-        if type(quad_inds) is list:
-            hinge_contact_points = empty_list_of_lists(len(quad_inds))
-            for i, ind in enumerate(quad_inds):
-                if len(self.hinge_contact_points[ind]) > 0:
-                    hinge_contact_points[i] = np.array(self.hinge_contact_points[ind], copy=True)
-            return hinge_contact_points
-        return self.hinge_contact_points[quad_inds]
-
-    def get_hinge_parent_nodes(self, quad_inds):
-        if type(quad_inds) is list:
-            hinge_parent_nodes = empty_list_of_lists(len(quad_inds))
-            for i, ind in enumerate(quad_inds):
-                if len(self.hinge_parent_nodes[ind]) > 0:
-                    hinge_parent_nodes[i] = np.array(self.hinge_parent_nodes[ind], copy=True)
-            return hinge_parent_nodes
-        return self.hinge_parent_nodes[quad_inds]
-
     def get_boundary_linkages(self, bound_ind):
         num_linkage_cols = self.num_linkage_cols
         num_linkage_rows = self.num_linkage_rows
@@ -876,20 +760,6 @@ class GenericStructure:
         if bound_ind == 3:  # top
             return [(-1, j) for j in range(num_linkage_cols - 1, -1, -1)]
 
-    def get_boundary_node_inds(self, bound_ind):
-        linkage_inds = self.get_outer_boundary_linkages(bound_ind)
-        boundary_node_inds = []
-        for i, j in linkage_inds:
-            linkage = self.build_linkage(i, j)
-            local_inds = [_ % 4 for _ in range(bound_ind + 1, bound_ind + 4)[::-1]]
-            if (self.is_horizontal_linkage(i, j) and is_even(bound_ind)) or (
-                not self.is_horizontal_linkage(i, j) and is_odd(bound_ind)
-            ):
-                local_inds.pop(1)
-            boundary_node_inds.extend([linkage[_] for _ in local_inds])
-
-        return boundary_node_inds
-
     def get_outer_boundary_node_inds(self, bound_ind):
 
         linkage_inds = self.get_outer_boundary_linkages(bound_ind)
@@ -906,79 +776,9 @@ class GenericStructure:
 
         return boundary_node_inds
 
-    def linkage2quad(self, i, j, k):
-
-        quad_ind = i * (self.num_linkage_cols + 1) + j
-        if k == 1 or k == 2:
-            quad_ind += self.num_linkage_cols + k
-        if k == 3:
-            quad_ind += 1
-
-        return quad_ind
-
     def is_linkage_parallel_to_boundary(self, i, j, bound_ind):
         h = self.is_horizontal_linkage(i, j)
         return (h and is_odd(bound_ind)) or ((not h) and is_even(bound_ind))
-
-    def get_dual_corner_angles(self):
-
-        num_linkage_rows = self.num_linkage_rows
-        num_linkage_cols = self.num_linkage_cols
-        quads = self.quads
-
-        dual_corner_angles = []
-
-        corner_linkage_inds = [
-            [0, 0],
-            [num_linkage_rows - 1, 0],
-            [num_linkage_rows - 1, num_linkage_cols - 1],
-            [0, num_linkage_cols - 1],
-        ]
-        for corner_ind, (i, j) in enumerate(corner_linkage_inds):
-            corner_quad = quads[self.linkage2quad(i, j, corner_ind)]
-
-            dual_corner_ind = corner_ind + 2 * is_even(corner_ind) - 1
-            corner_angle = [
-                corner_quad[(dual_corner_ind - 1) % 4],
-                corner_quad[dual_corner_ind],
-                corner_quad[(dual_corner_ind + 1) % 4],
-            ]
-            dual_corner_angles.append(corner_angle)
-
-        return dual_corner_angles
-
-    def get_dual_boundary_angles(self):
-
-        quads = self.quads
-
-        dual_boundary_angles = []
-        for bound_ind in range(4):
-            boundary_linkage_inds = self.get_boundary_linkages(bound_ind)
-            local_boundary_angles = []
-            for i, j in boundary_linkage_inds:
-
-                boundary_quad1 = np.array(quads[self.linkage2quad(i, j, bound_ind)], copy=True)
-                boundary_quad2 = np.array(
-                    quads[self.linkage2quad(i, j, (bound_ind + 1) % 4)], copy=True
-                )
-
-                if self.is_linkage_parallel_to_boundary(i, j, bound_ind):
-                    boundary_quad1 = cyclic(boundary_quad1, -1)
-                    boundary_quad2 = cyclic(boundary_quad2, 1)
-                else:
-                    boundary_quad1 = cyclic(boundary_quad1, 1)
-                    boundary_quad2 = cyclic(boundary_quad2, -1)
-
-                boundary_angle1 = boundary_quad1[[_ % 4 for _ in range(bound_ind, bound_ind + 3)]]
-                boundary_angle2 = boundary_quad2[
-                    [_ % 4 for _ in range(bound_ind - 1, bound_ind + 2)]
-                ]
-
-                local_boundary_angles.append(boundary_angle1)
-                local_boundary_angles.append(boundary_angle2)
-            dual_boundary_angles.append(np.vstack(local_boundary_angles))
-
-        return dual_boundary_angles
 
     def get_dual_boundary_node_inds(self, bound_ind):
         """
