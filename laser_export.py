@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 from typing import Dict, Iterable, List, Tuple, Optional
 
@@ -255,12 +256,14 @@ def _phi_to_radians(phi_value: float, phi_in_degrees: bool = False) -> float:
 
 def _write_basic_r12_dxf(
     cut_lines: Iterable[Tuple[float, float, float, float]],
+    cut_arcs: Iterable[Tuple[float, float, float, float, float]],
     connector_circles: Iterable[Tuple[float, float, float]],
     out_path: str,
 ) -> None:
     """
     Minimal R12 DXF writer with separate layers:
       - CUT:        line entities for full-depth cuts (borders + negative spaces)
+                    and arc entities for connector detours.
       - CONNECTORS: circle entities for tiny reference dots (do NOT cut)
     Coordinates are assumed to already be in millimeters.
     """
@@ -342,6 +345,28 @@ def _write_basic_r12_dxf(
             ]
         )
 
+    for cx, cy, r, a0_deg, a1_deg in cut_arcs:
+        dxf.extend(
+            [
+                "0",
+                "ARC",
+                "8",
+                "CUT",
+                "10",
+                f"{cx:.6f}",
+                "20",
+                f"{cy:.6f}",
+                "30",
+                "0",
+                "40",
+                f"{r:.6f}",
+                "50",
+                f"{a0_deg:.6f}",
+                "51",
+                f"{a1_deg:.6f}",
+            ]
+        )
+
     for cx, cy, r in connector_circles:
         dxf.extend(
             [
@@ -365,6 +390,171 @@ def _write_basic_r12_dxf(
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="ascii") as f:
         f.write("\n".join(dxf))
+
+
+def _apply_connector_keepouts_to_cuts(
+    cut_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    connector_centers: List[Tuple[float, float]],
+    *,
+    keepout_radius: float,
+    endpoint_tol: float,
+    add_detour_arcs: bool = True,
+) -> Tuple[
+    List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    List[Tuple[float, float, float, float, float]],
+]:
+    """
+    Modify cut segments so they do not pass through connector centers.
+
+    - Trims segments that start/end at a connector center back to the keepout circle.
+    - Splits any segment that crosses the keepout circle, removing the inside portion.
+    - Optionally adds a small arc (minor arc on the keepout circle) when exactly
+      two segments are incident to the connector center (rounded "cap" detour).
+
+    Returns:
+        new_segments: list of segments outside keepout circles
+        arcs: list of (cx, cy, r, start_rad, end_rad) CCW arcs on CUT layer
+    """
+
+    def _dist2(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+        dx = a[0] - b[0]
+        dy = a[1] - b[1]
+        return dx * dx + dy * dy
+
+    def _close(a: Tuple[float, float], b: Tuple[float, float], tol: float) -> bool:
+        return _dist2(a, b) <= tol * tol
+
+    def _trim_point(
+        center: Tuple[float, float], other: Tuple[float, float], r: float
+    ) -> Optional[Tuple[float, float]]:
+        vx = other[0] - center[0]
+        vy = other[1] - center[1]
+        n = math.hypot(vx, vy)
+        if n <= 0.0:
+            return None
+        s = r / n
+        return (center[0] + s * vx, center[1] + s * vy)
+
+    def _split_segment_excluding_circle(
+        seg: Tuple[Tuple[float, float], Tuple[float, float]],
+        center: Tuple[float, float],
+        r: float,
+        tol: float,
+    ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        (x0, y0), (x1, y1) = seg
+        cx, cy = center
+        dx = x1 - x0
+        dy = y1 - y0
+        a = dx * dx + dy * dy
+        if a <= tol * tol:
+            return []
+
+        fx = x0 - cx
+        fy = y0 - cy
+        b = 2.0 * (fx * dx + fy * dy)
+        c = fx * fx + fy * fy - r * r
+        disc = b * b - 4.0 * a * c
+
+        r2 = r * r
+        inside0 = _dist2((x0, y0), center) < r2 - tol * tol
+        inside1 = _dist2((x1, y1), center) < r2 - tol * tol
+
+        if disc < 0.0:
+            return [] if (inside0 or inside1) else [seg]
+
+        sqrt_disc = math.sqrt(max(0.0, disc))
+        t1 = (-b - sqrt_disc) / (2.0 * a)
+        t2 = (-b + sqrt_disc) / (2.0 * a)
+        t_low, t_high = (t1, t2) if t1 <= t2 else (t2, t1)
+
+        t_vals: List[float] = []
+        t_tol = 1e-12
+        for t in (t_low, t_high):
+            if -t_tol <= t <= 1.0 + t_tol:
+                t_clamped = max(0.0, min(1.0, t))
+                if not t_vals or abs(t_clamped - t_vals[-1]) > 1e-9:
+                    t_vals.append(t_clamped)
+
+        if not t_vals:
+            return [] if (inside0 or inside1) else [seg]
+
+        def _pt(t: float) -> Tuple[float, float]:
+            return (x0 + t * dx, y0 + t * dy)
+
+        if len(t_vals) == 1:
+            p = _pt(t_vals[0])
+            if inside0 and not inside1:
+                return [(p, (x1, y1))]
+            if inside1 and not inside0:
+                return [((x0, y0), p)]
+            return [seg]
+
+        p_enter = _pt(t_vals[0])
+        p_exit = _pt(t_vals[1])
+        out: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        if not inside0 and _dist2((x0, y0), p_enter) > tol * tol:
+            out.append(((x0, y0), p_enter))
+        if not inside1 and _dist2(p_exit, (x1, y1)) > tol * tol:
+            out.append((p_exit, (x1, y1)))
+        return out
+
+    segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = list(cut_segments)
+    arcs: List[Tuple[float, float, float, float, float]] = []
+
+    if keepout_radius <= 0.0 or not connector_centers or not segments:
+        return segments, arcs
+
+    for center in connector_centers:
+        trimmed_pts: List[Tuple[float, float]] = []
+
+        # Trim segments that directly start/end at the connector center.
+        next_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        for p0, p1 in segments:
+            if _close(p0, center, endpoint_tol) and _close(p1, center, endpoint_tol):
+                continue
+
+            if _close(p0, center, endpoint_tol) and not _close(p1, center, endpoint_tol):
+                p_trim = _trim_point(center, p1, keepout_radius)
+                if p_trim is not None:
+                    trimmed_pts.append(p_trim)
+                    next_segments.append((p_trim, p1))
+                continue
+
+            if _close(p1, center, endpoint_tol) and not _close(p0, center, endpoint_tol):
+                p_trim = _trim_point(center, p0, keepout_radius)
+                if p_trim is not None:
+                    trimmed_pts.append(p_trim)
+                    next_segments.append((p0, p_trim))
+                continue
+
+            next_segments.append((p0, p1))
+
+        # Split any remaining segments that cross the keepout circle.
+        split_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        for seg in next_segments:
+            split_segments.extend(
+                _split_segment_excluding_circle(seg, center, keepout_radius, tol=endpoint_tol)
+            )
+        segments = split_segments
+
+        if not add_detour_arcs or len(trimmed_pts) != 2:
+            continue
+
+        cx, cy = center
+        a0 = math.atan2(trimmed_pts[0][1] - cy, trimmed_pts[0][0] - cx) % (2.0 * math.pi)
+        a1 = math.atan2(trimmed_pts[1][1] - cy, trimmed_pts[1][0] - cx) % (2.0 * math.pi)
+        delta = (a1 - a0) % (2.0 * math.pi)
+        minor = min(delta, (2.0 * math.pi) - delta)
+
+        # Skip near-straight cases (e.g., connector placed on a long straight cut),
+        # where a semicircular detour is usually not desired.
+        if minor >= (math.pi - 1e-3):
+            continue
+
+        start, end = (a0, a1) if delta <= math.pi else (a1, a0)
+        arcs.append((cx, cy, keepout_radius, start, end))
+
+    return segments, arcs
 
 
 def _build_structure_context_for_eps(
@@ -473,6 +663,7 @@ class EpsLaserExporter:
         phi_in_degrees: bool = False,
         connector_radius: Optional[float] = None,
         preview_svg_path: Optional[str] = None,
+        avoid_connectors: bool = True,
     ) -> None:
         pts0, width_bb, height_bb, cut_segments, connector_points = self._layout_flat(
             phi_flat, phi_in_degrees=phi_in_degrees
@@ -493,6 +684,47 @@ class EpsLaserExporter:
             float(connector_radius) if connector_radius is not None else 2.5 * hinge_width
         )
 
+        cut_arcs_svg: List[str] = []
+        if avoid_connectors and connector_points and connector_radius > 0.0 and cut_segments:
+            # Apply keepout in model coords, then map to SVG coords.
+            segments_model: List[Tuple[Tuple[float, float], Tuple[float, float]]] = [
+                ((float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1]))) for p0, p1 in cut_segments
+            ]
+            centers_model: List[Tuple[float, float]] = [
+                (float(p[0]), float(p[1])) for p in connector_points
+            ]
+            endpoint_tol = max(1e-9, 1e-6 * max(width_bb, height_bb, 1.0))
+            segments_model_out, arcs_model = _apply_connector_keepouts_to_cuts(
+                segments_model,
+                centers_model,
+                keepout_radius=float(connector_radius),
+                endpoint_tol=float(endpoint_tol),
+                add_detour_arcs=True,
+            )
+
+            cut_lines = []
+            for (x0, y0), (x1, y1) in segments_model_out:
+                sx0, sy0 = _to_svg_xy(np.array([x0, y0], dtype=float))
+                sx1, sy1 = _to_svg_xy(np.array([x1, y1], dtype=float))
+                cut_lines.append((sx0, sy0, sx1, sy1))
+
+            # Approximate arcs as polylines to avoid SVG arc-center ambiguity.
+            for cx, cy, r, a0, a1 in arcs_model:
+                delta = (a1 - a0) % (2.0 * math.pi)
+                step = math.pi / 12.0  # 15 degrees
+                n = max(3, int(math.ceil(delta / step)) + 1)
+                pts: List[str] = []
+                for i in range(n):
+                    a = a0 + (delta * i) / float(n - 1)
+                    x = cx + r * math.cos(a)
+                    y = cy + r * math.sin(a)
+                    sx, sy = _to_svg_xy(np.array([x, y], dtype=float))
+                    pts.append(f"{sx:.8f},{sy:.8f}")
+                cut_arcs_svg.append(
+                    f'    <polyline points="{" ".join(pts)}" stroke="black" '
+                    f'stroke-width="{cut_width:.8f}" fill="none" />'
+                )
+
         svg_lines: List[str] = []
         svg_lines.append('<?xml version="1.0" encoding="UTF-8"?>')
         svg_lines.append(
@@ -509,6 +741,9 @@ class EpsLaserExporter:
                     f'x2="{x2:.8f}" y2="{y2:.8f}" stroke="black" '
                     f'stroke-width="{cut_width:.8f}" />'
                 )
+        if cut_arcs_svg:
+            svg_lines.append("    <!-- Connector detours -->")
+            svg_lines.extend(cut_arcs_svg)
 
         svg_lines.append("  </g>")
 
@@ -584,6 +819,7 @@ class EpsLaserExporter:
         connector_radius: Optional[float] = None,
         connector_radius_mm: Optional[float] = None,
         target_size_mm: float = 100.0,
+        avoid_connectors: bool = True,
     ) -> None:
         pts0, width_bb, height_bb, cut_segments, connector_points = self._layout_flat(
             phi_flat, phi_in_degrees=phi_in_degrees
@@ -596,12 +832,6 @@ class EpsLaserExporter:
 
         def _scale_xy(p: np.ndarray) -> Tuple[float, float]:
             return float(p[0] * scale), float(p[1] * scale)
-
-        cut_lines: List[Tuple[float, float, float, float]] = []
-        for p0, p1 in cut_segments:
-            x1, y1 = _scale_xy(p0)
-            x2, y2 = _scale_xy(p1)
-            cut_lines.append((x1, y1, x2, y2))
 
         base_connector_radius = (
             float(connector_radius) if connector_radius is not None else 2.5 * hinge_width
@@ -618,7 +848,46 @@ class EpsLaserExporter:
                 x, y = _scale_xy(pt)
                 connector_circles.append((x, y, connector_radius_out))
 
-        _write_basic_r12_dxf(cut_lines, connector_circles, out_path=dxf_path)
+        cut_lines: List[Tuple[float, float, float, float]] = []
+        cut_arcs: List[Tuple[float, float, float, float, float]] = []
+
+        if (
+            avoid_connectors
+            and connector_points
+            and connector_radius_out > 0.0
+            and cut_segments
+        ):
+            segments_mm: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+            for p0, p1 in cut_segments:
+                segments_mm.append((_scale_xy(p0), _scale_xy(p1)))
+            centers_mm: List[Tuple[float, float]] = [_scale_xy(pt) for pt in connector_points]
+            endpoint_tol_mm = max(1e-6, 1e-6 * float(target_size_mm or 1.0))
+            segments_mm_out, arcs_mm = _apply_connector_keepouts_to_cuts(
+                segments_mm,
+                centers_mm,
+                keepout_radius=float(connector_radius_out),
+                endpoint_tol=float(endpoint_tol_mm),
+                add_detour_arcs=True,
+            )
+            for (x0, y0), (x1, y1) in segments_mm_out:
+                cut_lines.append((x0, y0, x1, y1))
+            for cx, cy, r, a0, a1 in arcs_mm:
+                cut_arcs.append(
+                    (
+                        float(cx),
+                        float(cy),
+                        float(r),
+                        float(math.degrees(a0)),
+                        float(math.degrees(a1)),
+                    )
+                )
+        else:
+            for p0, p1 in cut_segments:
+                x1, y1 = _scale_xy(p0)
+                x2, y2 = _scale_xy(p1)
+                cut_lines.append((x1, y1, x2, y2))
+
+        _write_basic_r12_dxf(cut_lines, cut_arcs, connector_circles, out_path=dxf_path)
 
 
 def export_edges_to_svg_grouped(
@@ -711,6 +980,7 @@ def export_obj_pattern_to_svg(
     hinge_gap_fraction: float = 0.25,
     connector_radius: float = None,
     preview_svg_path: Optional[str] = None,
+    avoid_connectors: bool = True,
 ) -> None:
     """
     Read an OBJ pattern (points + quads) and export to SVG for laser cutting.
@@ -758,6 +1028,45 @@ def export_obj_pattern_to_svg(
         float(connector_radius) if connector_radius is not None else 2.5 * hinge_width
     )
 
+    cut_arcs_svg: List[str] = []
+    if avoid_connectors and connector_points and connector_radius > 0.0 and cut_segments:
+        segments_model: List[Tuple[Tuple[float, float], Tuple[float, float]]] = [
+            ((float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1]))) for p0, p1 in cut_segments
+        ]
+        centers_model: List[Tuple[float, float]] = [
+            (float(p[0]), float(p[1])) for p in connector_points
+        ]
+        endpoint_tol = max(1e-9, 1e-6 * max(width, height, 1.0))
+        segments_model_out, arcs_model = _apply_connector_keepouts_to_cuts(
+            segments_model,
+            centers_model,
+            keepout_radius=float(connector_radius),
+            endpoint_tol=float(endpoint_tol),
+            add_detour_arcs=True,
+        )
+
+        cut_lines = []
+        for (x0, y0), (x1, y1) in segments_model_out:
+            sx0, sy0 = _to_svg_xy(np.array([x0, y0], dtype=float))
+            sx1, sy1 = _to_svg_xy(np.array([x1, y1], dtype=float))
+            cut_lines.append((sx0, sy0, sx1, sy1))
+
+        for cx, cy, r, a0, a1 in arcs_model:
+            delta = (a1 - a0) % (2.0 * math.pi)
+            step = math.pi / 12.0  # 15 degrees
+            n = max(3, int(math.ceil(delta / step)) + 1)
+            pts: List[str] = []
+            for i in range(n):
+                a = a0 + (delta * i) / float(n - 1)
+                x = cx + r * math.cos(a)
+                y = cy + r * math.sin(a)
+                sx, sy = _to_svg_xy(np.array([x, y], dtype=float))
+                pts.append(f"{sx:.8f},{sy:.8f}")
+            cut_arcs_svg.append(
+                f'    <polyline points="{" ".join(pts)}" stroke="black" '
+                f'stroke-width="{cut_width:.8f}" fill="none" />'
+            )
+
     svg_lines: List[str] = []
     svg_lines.append('<?xml version="1.0" encoding="UTF-8"?>')
     svg_lines.append(
@@ -774,6 +1083,9 @@ def export_obj_pattern_to_svg(
                 f'x2="{x2:.8f}" y2="{y2:.8f}" stroke="black" '
                 f'stroke-width="{cut_width:.8f}" />'
             )
+    if cut_arcs_svg:
+        svg_lines.append("    <!-- Connector detours -->")
+        svg_lines.extend(cut_arcs_svg)
     svg_lines.append("  </g>")
 
     if connector_points:
@@ -848,6 +1160,7 @@ def export_eps_pattern_to_svg(
     preview_svg_path: Optional[str] = None,
     phi_ref: Optional[float] = None,
     phi_ref_in_degrees: bool = False,
+    avoid_connectors: bool = True,
 ) -> None:
     """
     Build a MatrixStructure from an interior-offset field eps and export its
@@ -871,6 +1184,7 @@ def export_eps_pattern_to_svg(
         phi_in_degrees=phi_in_degrees,
         connector_radius=connector_radius,
         preview_svg_path=preview_svg_path,
+        avoid_connectors=avoid_connectors,
     )
 
 
@@ -886,6 +1200,7 @@ def export_eps_pattern_to_dxf(
     target_size_mm: float = 100.0,
     phi_ref: Optional[float] = None,
     phi_ref_in_degrees: bool = False,
+    avoid_connectors: bool = True,
 ) -> None:
     """
     Export an eps field to a DXF with cut lines and connector dots.
@@ -907,6 +1222,7 @@ def export_eps_pattern_to_dxf(
         connector_radius=connector_radius,
         connector_radius_mm=connector_radius_mm,
         target_size_mm=target_size_mm,
+        avoid_connectors=avoid_connectors,
     )
 
 
