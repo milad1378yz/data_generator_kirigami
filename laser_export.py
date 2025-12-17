@@ -14,6 +14,10 @@ ConnectorDef = Tuple[Tuple[int, int, int], Tuple[int, int, int], float, float]
 # Global export toggles (override per-call via function args)
 # -----------------------------------------------------------------------------
 
+# Target physical size for DXF exports (longest bounding-box side), in millimeters.
+# 5 cm × 5 cm sheet target by default.
+DEFAULT_TARGET_SIZE_MM = 100.0
+
 # If True, cut paths are trimmed/split around connector markers and detour arcs
 # are added along the void side of the connector circle.
 AVOID_CONNECTOR_OVERLAP = True
@@ -946,7 +950,7 @@ class EpsLaserExporter:
         phi_in_degrees: bool = False,
         connector_radius: Optional[float] = None,
         connector_radius_mm: Optional[float] = None,
-        target_size_mm: float = 100.0,
+        target_size_mm: float = DEFAULT_TARGET_SIZE_MM,
         avoid_connectors: Optional[bool] = None,
         export_connectors: Optional[bool] = None,
     ) -> None:
@@ -1342,7 +1346,7 @@ def export_eps_pattern_to_dxf(
     phi_in_degrees: bool = False,
     connector_radius: float = None,
     connector_radius_mm: float = None,
-    target_size_mm: float = 100.0,
+    target_size_mm: float = DEFAULT_TARGET_SIZE_MM,
     phi_ref: Optional[float] = None,
     phi_ref_in_degrees: bool = False,
     avoid_connectors: Optional[bool] = None,
