@@ -1,7 +1,7 @@
 import argparse
 import math
 import os
-from typing import Dict, Iterable, List, Tuple, Optional
+from typing import Callable, Dict, Iterable, List, Tuple, Optional
 
 import numpy as np
 
@@ -9,6 +9,18 @@ from kirigami.utils import read_obj
 
 
 ConnectorDef = Tuple[Tuple[int, int, int], Tuple[int, int, int], float, float]
+
+# -----------------------------------------------------------------------------
+# Global export toggles (override per-call via function args)
+# -----------------------------------------------------------------------------
+
+# If True, cut paths are trimmed/split around connector markers and detour arcs
+# are added along the void side of the connector circle.
+AVOID_CONNECTOR_OVERLAP = True
+
+# If True, write connector marker circles (SVG) / CONNECTORS layer circles (DXF).
+EXPORT_SVG_CONNECTOR_MARKERS = False
+EXPORT_DXF_CONNECTOR_MARKERS = False
 
 
 def _normalize_to_origin(points: np.ndarray) -> Tuple[np.ndarray, float, float]:
@@ -49,9 +61,7 @@ def _edge_key(
     return (a, b) if a <= b else (b, a)
 
 
-def _gather_segments(
-    pts: np.ndarray, quads: np.ndarray
-) -> List[Tuple[np.ndarray, np.ndarray]]:
+def _gather_segments(pts: np.ndarray, quads: np.ndarray) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
     Collect oriented edge segments for every quad.
     """
@@ -264,9 +274,16 @@ def _write_basic_r12_dxf(
     Minimal R12 DXF writer with separate layers:
       - CUT:        line entities for full-depth cuts (borders + negative spaces)
                     and arc entities for connector detours.
-      - CONNECTORS: circle entities for tiny reference dots (do NOT cut)
+      - CONNECTORS: circle entities for tiny reference dots (do NOT cut); omitted
+                    if no connector circles are provided.
     Coordinates are assumed to already be in millimeters.
     """
+    cut_lines = list(cut_lines)
+    cut_arcs = list(cut_arcs)
+    connector_circles = list(connector_circles)
+    include_connectors = len(connector_circles) > 0
+    n_layers = 1 + (1 if include_connectors else 0)
+
     dxf: List[str] = []
     dxf.extend(
         [
@@ -279,7 +296,11 @@ def _write_basic_r12_dxf(
             "1",
             "AC1009",
             "999",
-            "Units: millimeters; connectors on CONNECTORS layer are reference dots (skip cutting).",
+            (
+                "Units: millimeters; connectors on CONNECTORS layer are reference dots (skip cutting)."
+                if include_connectors
+                else "Units: millimeters."
+            ),
             "0",
             "ENDSEC",
             "0",
@@ -291,7 +312,7 @@ def _write_basic_r12_dxf(
             "2",
             "LAYER",
             "70",
-            "2",  # number of layers
+            str(n_layers),
             "0",
             "LAYER",
             "2",
@@ -302,26 +323,33 @@ def _write_basic_r12_dxf(
             "1",
             "6",
             "CONTINUOUS",
-            "0",
-            "LAYER",
-            "2",
-            "CONNECTORS",
-            "70",
-            "0",
-            "62",
-            "3",
-            "6",
-            "CONTINUOUS",
-            "0",
-            "ENDTAB",
-            "0",
-            "ENDSEC",
-            "0",
-            "SECTION",
-            "2",
-            "ENTITIES",
         ]
     )
+    if include_connectors:
+        dxf.extend(
+            [
+                "0",
+                "LAYER",
+                "2",
+                "CONNECTORS",
+                "70",
+                "0",
+                "62",
+                "3",
+                "6",
+                "CONTINUOUS",
+                "0",
+                "ENDTAB",
+                "0",
+                "ENDSEC",
+                "0",
+                "SECTION",
+                "2",
+                "ENTITIES",
+            ]
+        )
+    else:
+        dxf.extend(["0", "ENDTAB", "0", "ENDSEC", "0", "SECTION", "2", "ENTITIES"])
 
     for x1, y1, x2, y2 in cut_lines:
         dxf.extend(
@@ -367,23 +395,24 @@ def _write_basic_r12_dxf(
             ]
         )
 
-    for cx, cy, r in connector_circles:
-        dxf.extend(
-            [
-                "0",
-                "CIRCLE",
-                "8",
-                "CONNECTORS",
-                "10",
-                f"{cx:.6f}",
-                "20",
-                f"{cy:.6f}",
-                "30",
-                "0",
-                "40",
-                f"{r:.6f}",
-            ]
-        )
+    if include_connectors:
+        for cx, cy, r in connector_circles:
+            dxf.extend(
+                [
+                    "0",
+                    "CIRCLE",
+                    "8",
+                    "CONNECTORS",
+                    "10",
+                    f"{cx:.6f}",
+                    "20",
+                    f"{cy:.6f}",
+                    "30",
+                    "0",
+                    "40",
+                    f"{r:.6f}",
+                ]
+            )
 
     dxf.extend(["0", "ENDSEC", "0", "EOF"])
 
@@ -399,6 +428,8 @@ def _apply_connector_keepouts_to_cuts(
     keepout_radius: float,
     endpoint_tol: float,
     add_detour_arcs: bool = True,
+    is_material: Optional[Callable[[Tuple[float, float]], bool]] = None,
+    max_arc_angle: float = math.pi - 1e-3,
 ) -> Tuple[
     List[Tuple[Tuple[float, float], Tuple[float, float]]],
     List[Tuple[float, float, float, float, float]],
@@ -440,14 +471,14 @@ def _apply_connector_keepouts_to_cuts(
         center: Tuple[float, float],
         r: float,
         tol: float,
-    ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    ) -> Tuple[List[Tuple[Tuple[float, float], Tuple[float, float]]], List[Tuple[float, float]]]:
         (x0, y0), (x1, y1) = seg
         cx, cy = center
         dx = x1 - x0
         dy = y1 - y0
         a = dx * dx + dy * dy
         if a <= tol * tol:
-            return []
+            return [], []
 
         fx = x0 - cx
         fy = y0 - cy
@@ -460,7 +491,7 @@ def _apply_connector_keepouts_to_cuts(
         inside1 = _dist2((x1, y1), center) < r2 - tol * tol
 
         if disc < 0.0:
-            return [] if (inside0 or inside1) else [seg]
+            return ([] if (inside0 or inside1) else [seg]), []
 
         sqrt_disc = math.sqrt(max(0.0, disc))
         t1 = (-b - sqrt_disc) / (2.0 * a)
@@ -476,7 +507,7 @@ def _apply_connector_keepouts_to_cuts(
                     t_vals.append(t_clamped)
 
         if not t_vals:
-            return [] if (inside0 or inside1) else [seg]
+            return ([] if (inside0 or inside1) else [seg]), []
 
         def _pt(t: float) -> Tuple[float, float]:
             return (x0 + t * dx, y0 + t * dy)
@@ -484,10 +515,10 @@ def _apply_connector_keepouts_to_cuts(
         if len(t_vals) == 1:
             p = _pt(t_vals[0])
             if inside0 and not inside1:
-                return [(p, (x1, y1))]
+                return [(p, (x1, y1))], [p]
             if inside1 and not inside0:
-                return [((x0, y0), p)]
-            return [seg]
+                return [((x0, y0), p)], [p]
+            return [seg], [p]
 
         p_enter = _pt(t_vals[0])
         p_exit = _pt(t_vals[1])
@@ -496,7 +527,17 @@ def _apply_connector_keepouts_to_cuts(
             out.append(((x0, y0), p_enter))
         if not inside1 and _dist2(p_exit, (x1, y1)) > tol * tol:
             out.append((p_exit, (x1, y1)))
-        return out
+        return out, [p_enter, p_exit]
+
+    def _dedup_points(pts: List[Tuple[float, float]], tol: float) -> List[Tuple[float, float]]:
+        if not pts:
+            return []
+        q = max(float(tol), 1e-12)
+        out: Dict[Tuple[int, int], Tuple[float, float]] = {}
+        for x, y in pts:
+            key = (int(round(float(x) / q)), int(round(float(y) / q)))
+            out[key] = (float(x), float(y))
+        return list(out.values())
 
     segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = list(cut_segments)
     arcs: List[Tuple[float, float, float, float, float]] = []
@@ -505,7 +546,8 @@ def _apply_connector_keepouts_to_cuts(
         return segments, arcs
 
     for center in connector_centers:
-        trimmed_pts: List[Tuple[float, float]] = []
+        connector_circle_hits: List[Tuple[float, float]] = []
+        trimmed_pts: List[Tuple[float, float]] = []  # used for fallback arc mode
 
         # Trim segments that directly start/end at the connector center.
         next_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
@@ -516,6 +558,7 @@ def _apply_connector_keepouts_to_cuts(
             if _close(p0, center, endpoint_tol) and not _close(p1, center, endpoint_tol):
                 p_trim = _trim_point(center, p1, keepout_radius)
                 if p_trim is not None:
+                    connector_circle_hits.append(p_trim)
                     trimmed_pts.append(p_trim)
                     next_segments.append((p_trim, p1))
                 continue
@@ -523,6 +566,7 @@ def _apply_connector_keepouts_to_cuts(
             if _close(p1, center, endpoint_tol) and not _close(p0, center, endpoint_tol):
                 p_trim = _trim_point(center, p0, keepout_radius)
                 if p_trim is not None:
+                    connector_circle_hits.append(p_trim)
                     trimmed_pts.append(p_trim)
                     next_segments.append((p0, p_trim))
                 continue
@@ -532,29 +576,100 @@ def _apply_connector_keepouts_to_cuts(
         # Split any remaining segments that cross the keepout circle.
         split_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
         for seg in next_segments:
-            split_segments.extend(
-                _split_segment_excluding_circle(seg, center, keepout_radius, tol=endpoint_tol)
+            segs_out, hits = _split_segment_excluding_circle(
+                seg, center, keepout_radius, tol=endpoint_tol
             )
+            split_segments.extend(segs_out)
+            connector_circle_hits.extend(hits)
         segments = split_segments
 
-        if not add_detour_arcs or len(trimmed_pts) != 2:
+        if not add_detour_arcs:
             continue
 
         cx, cy = center
+
+        # Preferred mode: only cut arcs on the void side (outside the material).
+        if is_material is not None:
+            hits = _dedup_points(connector_circle_hits, tol=endpoint_tol)
+            if len(hits) < 2:
+                continue
+
+            angles = [math.atan2(y - cy, x - cx) % (2.0 * math.pi) for x, y in hits]
+            order = sorted(range(len(angles)), key=angles.__getitem__)
+            angles_sorted = [angles[i] for i in order]
+
+            sample_margin = max(keepout_radius * 0.05, endpoint_tol * 10.0, 1e-12)
+            for i, a0 in enumerate(angles_sorted):
+                a1 = angles_sorted[(i + 1) % len(angles_sorted)]
+                delta = (a1 - a0) % (2.0 * math.pi)
+                if delta <= 1e-9 or delta >= max_arc_angle:
+                    continue
+                mid = a0 + 0.5 * delta
+                sample = (
+                    cx + (keepout_radius + sample_margin) * math.cos(mid),
+                    cy + (keepout_radius + sample_margin) * math.sin(mid),
+                )
+                if is_material(sample):
+                    continue
+                arcs.append((cx, cy, keepout_radius, a0, a1))
+            continue
+
+        # Fallback: purely geometric rounded corner for exactly 2 incident segments.
+        if len(trimmed_pts) != 2:
+            continue
+
         a0 = math.atan2(trimmed_pts[0][1] - cy, trimmed_pts[0][0] - cx) % (2.0 * math.pi)
         a1 = math.atan2(trimmed_pts[1][1] - cy, trimmed_pts[1][0] - cx) % (2.0 * math.pi)
         delta = (a1 - a0) % (2.0 * math.pi)
         minor = min(delta, (2.0 * math.pi) - delta)
-
-        # Skip near-straight cases (e.g., connector placed on a long straight cut),
-        # where a semicircular detour is usually not desired.
-        if minor >= (math.pi - 1e-3):
+        if minor >= max_arc_angle:
             continue
 
         start, end = (a0, a1) if delta <= math.pi else (a1, a0)
         arcs.append((cx, cy, keepout_radius, start, end))
 
     return segments, arcs
+
+
+def _make_material_tester(
+    points: np.ndarray, quads: np.ndarray
+) -> Callable[[Tuple[float, float]], bool]:
+    pts = np.asarray(points, dtype=float)
+    quads = np.asarray(quads, dtype=int)
+
+    polys: List[List[Tuple[float, float]]] = []
+    bboxes: List[Tuple[float, float, float, float]] = []
+
+    for quad in quads:
+        poly = [(float(pts[int(i)][0]), float(pts[int(i)][1])) for i in quad]
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        polys.append(poly)
+        bboxes.append((min(xs), max(xs), min(ys), max(ys)))
+
+    def _point_in_poly(point: Tuple[float, float], poly: List[Tuple[float, float]]) -> bool:
+        x, y = point
+        inside = False
+        n = len(poly)
+        for i in range(n):
+            x0, y0 = poly[i]
+            x1, y1 = poly[(i + 1) % n]
+            if (y0 > y) != (y1 > y):
+                x_int = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+                if x_int > x:
+                    inside = not inside
+        return inside
+
+    def is_material(point: Tuple[float, float]) -> bool:
+        x, y = point
+        for (xmin, xmax, ymin, ymax), poly in zip(bboxes, polys):
+            if x < xmin or x > xmax or y < ymin or y > ymax:
+                continue
+            if _point_in_poly(point, poly):
+                return True
+        return False
+
+    return is_material
 
 
 def _build_structure_context_for_eps(
@@ -575,21 +690,23 @@ def _build_structure_context_for_eps(
                 linkage_ind[0], linkage_ind[1], i
             )
             if j == 0:
-                corner = np.array([linkage_ind[1], -linkage_ind[0]], dtype=float) + bound_directions[i]
+                corner = (
+                    np.array([linkage_ind[1], -linkage_ind[0]], dtype=float) + bound_directions[i]
+                )
                 if not is_parallel:
                     corner += bound_directions[(i - 1) % 4]
                 corners.append(corner)
             if not is_parallel:
-                point = np.array([linkage_ind[1], -linkage_ind[0]], dtype=float) + bound_directions[i]
+                point = (
+                    np.array([linkage_ind[1], -linkage_ind[0]], dtype=float) + bound_directions[i]
+                )
                 local_boundary_points.append(point)
         boundary_points.append(
             np.vstack(local_boundary_points) if local_boundary_points else np.zeros((0, 2))
         )
 
     corners_arr = np.vstack(corners) if corners else np.zeros((0, 2))
-    boundary_points_vector = (
-        np.vstack(boundary_points) if boundary_points else np.zeros((0, 2))
-    )
+    boundary_points_vector = np.vstack(boundary_points) if boundary_points else np.zeros((0, 2))
     boundary_offsets = [[0.0] * height, [0.0] * width, [0.0] * height, [0.0] * width]
     return structure, boundary_points_vector, corners_arr, boundary_offsets
 
@@ -663,8 +780,14 @@ class EpsLaserExporter:
         phi_in_degrees: bool = False,
         connector_radius: Optional[float] = None,
         preview_svg_path: Optional[str] = None,
-        avoid_connectors: bool = True,
+        avoid_connectors: Optional[bool] = None,
+        export_connectors: Optional[bool] = None,
     ) -> None:
+        if avoid_connectors is None:
+            avoid_connectors = AVOID_CONNECTOR_OVERLAP
+        if export_connectors is None:
+            export_connectors = EXPORT_SVG_CONNECTOR_MARKERS
+
         pts0, width_bb, height_bb, cut_segments, connector_points = self._layout_flat(
             phi_flat, phi_in_degrees=phi_in_degrees
         )
@@ -688,11 +811,13 @@ class EpsLaserExporter:
         if avoid_connectors and connector_points and connector_radius > 0.0 and cut_segments:
             # Apply keepout in model coords, then map to SVG coords.
             segments_model: List[Tuple[Tuple[float, float], Tuple[float, float]]] = [
-                ((float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1]))) for p0, p1 in cut_segments
+                ((float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1])))
+                for p0, p1 in cut_segments
             ]
             centers_model: List[Tuple[float, float]] = [
                 (float(p[0]), float(p[1])) for p in connector_points
             ]
+            is_material_model = _make_material_tester(pts0, self.structure.quads)
             endpoint_tol = max(1e-9, 1e-6 * max(width_bb, height_bb, 1.0))
             segments_model_out, arcs_model = _apply_connector_keepouts_to_cuts(
                 segments_model,
@@ -700,6 +825,7 @@ class EpsLaserExporter:
                 keepout_radius=float(connector_radius),
                 endpoint_tol=float(endpoint_tol),
                 add_detour_arcs=True,
+                is_material=is_material_model,
             )
 
             cut_lines = []
@@ -731,7 +857,9 @@ class EpsLaserExporter:
             f'<svg xmlns="http://www.w3.org/2000/svg" '
             f'version="1.1" viewBox="0 0 {width_bb:.8f} {height_bb:.8f}">'
         )
-        svg_lines.append('  <g id="cuts" fill="none" stroke-linecap="round" stroke-linejoin="round">')
+        svg_lines.append(
+            '  <g id="cuts" fill="none" stroke-linecap="round" stroke-linejoin="round">'
+        )
 
         if cut_lines:
             svg_lines.append("    <!-- Tile outlines / full cuts -->")
@@ -747,7 +875,7 @@ class EpsLaserExporter:
 
         svg_lines.append("  </g>")
 
-        if connector_points:
+        if export_connectors and connector_points:
             svg_lines.append('  <g id="connectors" fill="red" stroke="none">')
             svg_lines.append("    <!-- Tiny connector dots at edge intersections (do NOT cut) -->")
             for pt in connector_points:
@@ -795,7 +923,7 @@ class EpsLaserExporter:
                 svg_preview.append(f'    <polygon points="{pts_str}" />')
             svg_preview.append("  </g>")
 
-        if connector_points:
+        if export_connectors and connector_points:
             svg_preview.append('  <g id="connectors" fill="#d33" stroke="none">')
             for pt in connector_points:
                 x, y = _to_svg_xy(pt)
@@ -819,8 +947,14 @@ class EpsLaserExporter:
         connector_radius: Optional[float] = None,
         connector_radius_mm: Optional[float] = None,
         target_size_mm: float = 100.0,
-        avoid_connectors: bool = True,
+        avoid_connectors: Optional[bool] = None,
+        export_connectors: Optional[bool] = None,
     ) -> None:
+        if avoid_connectors is None:
+            avoid_connectors = AVOID_CONNECTOR_OVERLAP
+        if export_connectors is None:
+            export_connectors = EXPORT_DXF_CONNECTOR_MARKERS
+
         pts0, width_bb, height_bb, cut_segments, connector_points = self._layout_flat(
             phi_flat, phi_in_degrees=phi_in_degrees
         )
@@ -843,7 +977,7 @@ class EpsLaserExporter:
         )
 
         connector_circles: List[Tuple[float, float, float]] = []
-        if connector_points and connector_radius_out > 0.0:
+        if export_connectors and connector_points and connector_radius_out > 0.0:
             for pt in connector_points:
                 x, y = _scale_xy(pt)
                 connector_circles.append((x, y, connector_radius_out))
@@ -851,16 +985,16 @@ class EpsLaserExporter:
         cut_lines: List[Tuple[float, float, float, float]] = []
         cut_arcs: List[Tuple[float, float, float, float, float]] = []
 
-        if (
-            avoid_connectors
-            and connector_points
-            and connector_radius_out > 0.0
-            and cut_segments
-        ):
+        if avoid_connectors and connector_points and connector_radius_out > 0.0 and cut_segments:
             segments_mm: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
             for p0, p1 in cut_segments:
                 segments_mm.append((_scale_xy(p0), _scale_xy(p1)))
             centers_mm: List[Tuple[float, float]] = [_scale_xy(pt) for pt in connector_points]
+            is_material_model = _make_material_tester(pts0, self.structure.quads)
+
+            def is_material_mm(p: Tuple[float, float]) -> bool:
+                return is_material_model((p[0] / scale, p[1] / scale))
+
             endpoint_tol_mm = max(1e-6, 1e-6 * float(target_size_mm or 1.0))
             segments_mm_out, arcs_mm = _apply_connector_keepouts_to_cuts(
                 segments_mm,
@@ -868,6 +1002,7 @@ class EpsLaserExporter:
                 keepout_radius=float(connector_radius_out),
                 endpoint_tol=float(endpoint_tol_mm),
                 add_detour_arcs=True,
+                is_material=is_material_mm,
             )
             for (x0, y0), (x1, y1) in segments_mm_out:
                 cut_lines.append((x0, y0, x1, y1))
@@ -980,7 +1115,8 @@ def export_obj_pattern_to_svg(
     hinge_gap_fraction: float = 0.25,
     connector_radius: float = None,
     preview_svg_path: Optional[str] = None,
-    avoid_connectors: bool = True,
+    avoid_connectors: Optional[bool] = None,
+    export_connectors: Optional[bool] = None,
 ) -> None:
     """
     Read an OBJ pattern (points + quads) and export to SVG for laser cutting.
@@ -1028,6 +1164,11 @@ def export_obj_pattern_to_svg(
         float(connector_radius) if connector_radius is not None else 2.5 * hinge_width
     )
 
+    if avoid_connectors is None:
+        avoid_connectors = AVOID_CONNECTOR_OVERLAP
+    if export_connectors is None:
+        export_connectors = EXPORT_SVG_CONNECTOR_MARKERS
+
     cut_arcs_svg: List[str] = []
     if avoid_connectors and connector_points and connector_radius > 0.0 and cut_segments:
         segments_model: List[Tuple[Tuple[float, float], Tuple[float, float]]] = [
@@ -1036,6 +1177,7 @@ def export_obj_pattern_to_svg(
         centers_model: List[Tuple[float, float]] = [
             (float(p[0]), float(p[1])) for p in connector_points
         ]
+        is_material_model = _make_material_tester(pts0, faces)
         endpoint_tol = max(1e-9, 1e-6 * max(width, height, 1.0))
         segments_model_out, arcs_model = _apply_connector_keepouts_to_cuts(
             segments_model,
@@ -1043,6 +1185,7 @@ def export_obj_pattern_to_svg(
             keepout_radius=float(connector_radius),
             endpoint_tol=float(endpoint_tol),
             add_detour_arcs=True,
+            is_material=is_material_model,
         )
 
         cut_lines = []
@@ -1088,7 +1231,7 @@ def export_obj_pattern_to_svg(
         svg_lines.extend(cut_arcs_svg)
     svg_lines.append("  </g>")
 
-    if connector_points:
+    if export_connectors and connector_points:
         svg_lines.append('  <g id="connectors" fill="red" stroke="none">')
         svg_lines.append("    <!-- Tiny connector dots at edge intersections (do NOT cut) -->")
         for pt in connector_points:
@@ -1133,7 +1276,7 @@ def export_obj_pattern_to_svg(
                 svg_preview.append(f'    <polygon points="{pts_str}" />')
             svg_preview.append("  </g>")
 
-        if connector_points:
+        if export_connectors and connector_points:
             svg_preview.append('  <g id="connectors" fill="#d33" stroke="none">')
             for pt in connector_points:
                 x, y = _to_svg_xy(pt)
@@ -1160,7 +1303,8 @@ def export_eps_pattern_to_svg(
     preview_svg_path: Optional[str] = None,
     phi_ref: Optional[float] = None,
     phi_ref_in_degrees: bool = False,
-    avoid_connectors: bool = True,
+    avoid_connectors: Optional[bool] = None,
+    export_connectors: Optional[bool] = None,
 ) -> None:
     """
     Build a MatrixStructure from an interior-offset field eps and export its
@@ -1185,6 +1329,7 @@ def export_eps_pattern_to_svg(
         connector_radius=connector_radius,
         preview_svg_path=preview_svg_path,
         avoid_connectors=avoid_connectors,
+        export_connectors=export_connectors,
     )
 
 
@@ -1200,7 +1345,8 @@ def export_eps_pattern_to_dxf(
     target_size_mm: float = 100.0,
     phi_ref: Optional[float] = None,
     phi_ref_in_degrees: bool = False,
-    avoid_connectors: bool = True,
+    avoid_connectors: Optional[bool] = None,
+    export_connectors: Optional[bool] = None,
 ) -> None:
     """
     Export an eps field to a DXF with cut lines and connector dots.
@@ -1223,6 +1369,7 @@ def export_eps_pattern_to_dxf(
         connector_radius_mm=connector_radius_mm,
         target_size_mm=target_size_mm,
         avoid_connectors=avoid_connectors,
+        export_connectors=export_connectors,
     )
 
 
