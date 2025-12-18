@@ -1,4 +1,19 @@
-from .utils import *
+from .utils import (
+    calculate_angle,
+    cyclic,
+    empty_list_of_lists,
+    is_even,
+    is_odd,
+    multiply_matrices,
+    norm,
+    plot_structure,
+    rotate_points,
+    normalize,
+    translation_matrix_homog,
+    rotation_matrix_homog,
+)
+import numpy as np
+
 
 # Numerical stability knobs for inverse design solvers
 # If the boundary system condition number exceeds this, raise an error.
@@ -66,6 +81,71 @@ class GenericStructure:
         self.quad_genders = None  # Shape: (n_quads,)
         self.hinge_contact_points = None  # List of arrays for each quad
         self.hinge_parent_nodes = None  # List of arrays for each quad
+
+    def plot(
+        self,
+        points=None,
+        ax=None,
+        *,
+        phi=None,
+        show_hinges=False,
+        hinge_size=14,
+        hinge_color=(0.85, 0.2, 0.2, 0.65),
+        **plot_kwargs,
+    ):
+        """
+        Convenience visualization helper.
+
+        Args:
+            points (ndarray | None): Coordinates to plot. Defaults to `self.points`.
+            ax (matplotlib.axes.Axes | None): Existing axes to draw on. If None, a
+                new figure/axes is created.
+
+        Keyword args:
+            phi (float | None): If provided (and `points` is None), plot the deployed
+                configuration returned by `self.layout(phi)`.
+            show_hinges (bool): If True, overlay hinge contact points when available.
+            **plot_kwargs: Forwarded to `kirigami.utils.plot_structure`.
+
+        Returns:
+            matplotlib.axes.Axes: The axes used for drawing.
+        """
+        if points is not None and phi is not None:
+            raise ValueError("Pass either `points` or `phi`, not both.")
+
+        mapped_hinges = None
+        if points is None and phi is not None:
+            points, mapped_hinges = self.layout(phi)
+
+        if points is None:
+            points = self.points
+        if points is None:
+            raise ValueError("No points available to plot (structure.points is None).")
+
+        if ax is None:
+            import matplotlib.pyplot as plt
+
+            _, ax = plt.subplots(figsize=(5, 5))
+
+        plot_structure(points, self.quads, self.linkages, ax=ax, **plot_kwargs)
+
+        if show_hinges:
+            if mapped_hinges is None and self.hinge_contact_points is not None:
+                mapped_hinges = self.hinge_contact_points
+            if mapped_hinges is not None:
+                for h in mapped_hinges:
+                    if len(h) == 0:
+                        continue
+                    ax.scatter(
+                        h[:, 0],
+                        h[:, 1],
+                        s=hinge_size,
+                        c=[hinge_color],
+                        linewidths=0.0,
+                        zorder=20,
+                    )
+
+        return ax
 
     def build_linkage(self, i, j):
         """
@@ -481,9 +561,13 @@ class GenericStructure:
 
                 linkage_index += 1
 
-        # recover hinge contact point layout
-        quad_mappings = self.extract_quad_mappings(points, layout_points)
+        # Recover hinge contact point layout (if hinge points have been initialized).
         hinge_contact_points = self.hinge_contact_points
+        if hinge_contact_points is None:
+            mapped_hinge_contact_points = [np.array([]) for _ in range(len(quads))]
+            return layout_points, mapped_hinge_contact_points
+
+        quad_mappings = self.extract_quad_mappings(points, layout_points)
         mapped_hinge_contact_points = empty_list_of_lists(len(quads))
         for i, quad in enumerate(quads):
             local_hcps = hinge_contact_points[i]
@@ -826,7 +910,6 @@ class GenericStructure:
             )
 
         return affine_matrices
-
 
     # --- Geometry clean‑up helpers ---
     def _fix_quad_winding(self):

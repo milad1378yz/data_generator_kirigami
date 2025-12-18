@@ -2,92 +2,26 @@ import numpy as np
 
 
 def norm(x):
-    """
-    Calculate the Euclidean norm (magnitude) of a vector.
-
-    Args:
-        x (array-like): Input vector of any dimension
-
-    Returns:
-        float: The Euclidean norm of the vector
-
-    Shape transition: (n,) -> scalar
-    """
     return np.linalg.norm(x)
 
 
 def normalize(x):
-    """
-    Normalize a vector to unit length.
-
-    Args:
-        x (array-like): Input vector to normalize
-
-    Returns:
-        ndarray: Unit vector in the same direction as input
-
-    Shape transition: (n,) -> (n,) with norm = 1
-    """
     return x / norm(x)
 
 
 def is_even(x):
-    """
-    Check if a number is even using modular arithmetic.
-
-    Args:
-        x (int): Integer to check
-
-    Returns:
-        bool: True if x is even, False otherwise
-
-    Note: Uses (x + 1) % 2 which returns True for even numbers
-    """
     return bool((x + 1) % 2)
 
 
 def is_odd(x):
-    """
-    Check if a number is odd using modular arithmetic.
-
-    Args:
-        x (int): Integer to check
-
-    Returns:
-        bool: True if x is odd, False otherwise
-
-    Note: Uses x % 2 which returns True for odd numbers
-    """
     return bool(x % 2)
 
 
 def cyclic(x, a):
-    """
-    Cyclically shift array elements along the first axis.
-
-    Args:
-        x (ndarray): Input array to shift
-        a (int): Number of positions to shift (positive = right shift)
-
-    Returns:
-        ndarray: Array with cyclically shifted elements
-
-    Shape transition: (n, ...) -> (n, ...) with elements reordered
-    """
     return np.roll(x, a, axis=0)
 
+
 def empty_list_of_lists(n):
-    """
-    Create a list of n empty lists.
-
-    Args:
-        n (int): Number of empty lists to create
-
-    Returns:
-        list: List containing n empty lists
-
-    Shape creation: Creates structure for n independent sublists
-    """
     return [[] for _ in range(n)]
 
 
@@ -298,34 +232,189 @@ def shift_points(points, shift):
     return points + shift
 
 
-def plot_structure(points, quads, linkages, ax):
+def plot_structure(
+    points,
+    quads,
+    linkages,
+    ax,
+    *,
+    cmap="viridis",
+    color_by="centroid_x",
+    face_alpha=0.88,
+    mesh_color=(0.0, 0.0, 0.0, 0.18),
+    mesh_linewidth=0.8,
+    boundary_color=(0.0, 0.0, 0.0, 0.85),
+    boundary_linewidth=2.2,
+    show_nodes=False,
+    node_size=8,
+    node_color=(0.0, 0.0, 0.0, 0.55),
+    show_linkages=False,
+    linkage_color=(0.1, 0.1, 0.1, 0.35),
+    linkage_linewidth=1.0,
+    zorder=1,
+):
     """
-    Plot a kirigami structure showing quadrilateral faces.
+    Visualize a kirigami structure as a colored quad mesh.
+
+    This is intentionally implemented using Matplotlib collections (instead of per-quad
+    `ax.fill`) so large structures render quickly and styling can be layered (faces,
+    mesh edges, boundary outline, optional nodes/linkages).
 
     Args:
-        points (ndarray): Vertex coordinates, shape (n, 2)
-        quads (ndarray): Quad face indices, shape (m, 4)
-        linkages (ndarray): Linkage connectivity (unused in current implementation)
-        ax (matplotlib.axes.Axes): Matplotlib axes object for plotting
+        points (ndarray): Vertex coordinates, shape (n, 2).
+        quads (ndarray): Quad vertex indices, shape (m, 4).
+        linkages (ndarray | None): Optional linkage connectivity, shape (k, 4).
+        ax (matplotlib.axes.Axes): Axes to draw on.
 
-    Shape requirements:
-        - points: (n_vertices, 2) for 2D coordinates
-        - quads: (n_quads, 4) for quad vertex indices
-
-    Visual styling:
-        - Fill color: Light peach (1, 229/255, 204/255)
-        - Edge color: Black
-        - Edge width: 2
-        - Alpha: 0.8
+    Keyword args:
+        cmap (str): Matplotlib colormap name for quad fill colors.
+        color_by (str): One of {"centroid_x", "centroid_y", "index", "radial"}.
+        face_alpha (float): Alpha for filled quads.
+        mesh_color (color): Color for internal mesh edges.
+        mesh_linewidth (float): Line width for internal mesh edges.
+        boundary_color (color): Color for outer boundary edges.
+        boundary_linewidth (float): Line width for outer boundary edges.
+        show_nodes (bool): If True, scatter vertex positions.
+        show_linkages (bool): If True, draw linkage perimeters (dashed).
+        zorder (int): Base z-order for drawn artists.
     """
 
-    for i, quad in enumerate(quads):
-        x = points[quad, 0]
-        y = points[quad, 1]
-        ax.fill(x, y, color=(1, 229 / 255, 204 / 255), edgecolor="k", linewidth=2, alpha=0.8)
+    # Lazy imports keep non-plotting use-cases lightweight.
+    from matplotlib import cm, colors
+    from matplotlib.collections import LineCollection, PolyCollection
 
-    ax.axis("off")
+    pts = np.asarray(points, dtype=float)
+
+    qs = np.asarray(quads)
+    if qs.ndim != 2 or qs.shape[1] != 4:
+        raise ValueError(f"`quads` must have shape (n, 4); got {qs.shape}")
+
+    if qs.dtype == object:
+        quad_list = []
+        for q in qs:
+            if any(v is None for v in q):
+                continue
+            quad_list.append([int(v) for v in q])
+        qs = np.asarray(quad_list, dtype=int)
+    else:
+        qs = qs.astype(int, copy=False)
+
+    # Build polygons and drop non-finite ones to avoid Matplotlib warnings.
+    polys = pts[qs]  # (n_quads, 4, 2)
+    finite = np.isfinite(polys).all(axis=(1, 2))
+    qs = qs[finite]
+    polys = polys[finite]
+
+    if len(polys) == 0:
+        ax.axis("off")
+        ax.set_aspect("equal")
+        return
+
+    centroids = polys.mean(axis=1)
+    if color_by == "centroid_x":
+        values = centroids[:, 0]
+    elif color_by == "centroid_y":
+        values = centroids[:, 1]
+    elif color_by == "index":
+        values = np.arange(len(polys), dtype=float)
+    elif color_by == "radial":
+        c0 = centroids.mean(axis=0)
+        values = np.linalg.norm(centroids - c0[None, :], axis=1)
+    else:
+        raise ValueError(f"Unknown color_by={color_by!r}")
+
+    vmin = float(values.min())
+    vmax = float(values.max())
+    norm = colors.Normalize(vmin=vmin, vmax=vmax if vmax > vmin else vmin + 1.0)
+    facecolors = cm.get_cmap(cmap)(norm(values))
+    facecolors[:, 3] = face_alpha
+
+    ax.add_collection(
+        PolyCollection(polys, facecolors=facecolors, edgecolors="none", zorder=zorder)
+    )
+
+    # Compute unique edges and classify them as boundary vs internal.
+    edge_counts = {}
+    for q in qs:
+        for a, b in ((q[0], q[1]), (q[1], q[2]), (q[2], q[3]), (q[3], q[0])):
+            if a is None or b is None:
+                continue
+            a = int(a)
+            b = int(b)
+            key = (a, b) if a < b else (b, a)
+            edge_counts[key] = edge_counts.get(key, 0) + 1
+
+    def _segments_for(keys):
+        segs = []
+        for a, b in keys:
+            p = pts[[a, b]]
+            if np.isfinite(p).all():
+                segs.append(p)
+        return segs
+
+    boundary_keys = [e for e, c in edge_counts.items() if c == 1]
+    internal_keys = [e for e, c in edge_counts.items() if c > 1]
+
+    internal_segments = _segments_for(internal_keys)
+    if internal_segments:
+        ax.add_collection(
+            LineCollection(
+                internal_segments,
+                colors=[mesh_color],
+                linewidths=mesh_linewidth,
+                zorder=zorder + 1,
+            )
+        )
+
+    boundary_segments = _segments_for(boundary_keys)
+    if boundary_segments:
+        ax.add_collection(
+            LineCollection(
+                boundary_segments,
+                colors=[boundary_color],
+                linewidths=boundary_linewidth,
+                zorder=zorder + 2,
+            )
+        )
+
+    if show_linkages and linkages is not None:
+        ls = np.asarray(linkages)
+        if ls.ndim == 2 and ls.shape[1] == 4:
+            segs = []
+            for linkage in ls.astype(int, copy=False):
+                for a, b in (
+                    (linkage[0], linkage[1]),
+                    (linkage[1], linkage[2]),
+                    (linkage[2], linkage[3]),
+                    (linkage[3], linkage[0]),
+                ):
+                    p = pts[[a, b]]
+                    if np.isfinite(p).all():
+                        segs.append(p)
+            if segs:
+                ax.add_collection(
+                    LineCollection(
+                        segs,
+                        colors=[linkage_color],
+                        linewidths=linkage_linewidth,
+                        linestyles=(0, (3.0, 2.0)),
+                        zorder=zorder + 3,
+                    )
+                )
+
+    if show_nodes:
+        ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            s=node_size,
+            c=[node_color],
+            linewidths=0.0,
+            zorder=zorder + 4,
+        )
+
+    ax.autoscale_view()
     ax.set_aspect("equal")
+    ax.axis("off")
 
 
 def _orientation2d(a, b, c):
@@ -357,7 +446,7 @@ def _segments_intersect2d(p0, p1, p2, p3, tol=1e-9):
     if abs(o4) <= tol and _point_on_segment(p2, p1, p3, tol):
         return True
 
-    return (o1 * o2 < -tol**2) and (o3 * o4 < -tol**2)
+    return (o1 * o2 < -(tol**2)) and (o3 * o4 < -(tol**2))
 
 
 def find_invalid_quads(points, quads, area_tol=1e-8, tol=1e-9):
@@ -381,8 +470,7 @@ def find_invalid_quads(points, quads, area_tol=1e-8, tol=1e-9):
             continue
 
         area = 0.5 * sum(
-            poly[i, 0] * poly[(i + 1) % 4, 1] - poly[(i + 1) % 4, 0] * poly[i, 1]
-            for i in range(4)
+            poly[i, 0] * poly[(i + 1) % 4, 1] - poly[(i + 1) % 4, 0] * poly[i, 1] for i in range(4)
         )
         if abs(area) <= area_tol:
             invalid.append((idx, "collapsed area"))
@@ -417,10 +505,7 @@ def _aabb_for_poly(poly):
 
 def _aabb_overlap(b1, b2, tol=0.0):
     return not (
-        b1[1] < b2[0] - tol
-        or b2[1] < b1[0] - tol
-        or b1[3] < b2[2] - tol
-        or b2[3] < b1[2] - tol
+        b1[1] < b2[0] - tol or b2[1] < b1[0] - tol or b1[3] < b2[2] - tol or b2[3] < b1[2] - tol
     )
 
 
@@ -441,9 +526,7 @@ def _point_in_polygon(pt, poly, tol=1e-9):
         if _point_on_segment(np.array([xj, yj]), np.array([x, y]), np.array([xi, yi]), tol):
             return True
 
-        intersect = ((yi > y) != (yj > y)) and (
-            x < (xj - xi) * (y - yi) / (yj - yi + 1e-300) + xi
-        )
+        intersect = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-300) + xi)
         if intersect:
             inside = not inside
     return inside
