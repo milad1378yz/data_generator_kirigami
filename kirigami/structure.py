@@ -127,6 +127,7 @@ class GenericStructure:
 
             _, ax = plt.subplots(figsize=(5, 5))
 
+        plot_kwargs.setdefault("style", "paper")
         plot_structure(points, self.quads, self.linkages, ax=ax, **plot_kwargs)
 
         if show_hinges:

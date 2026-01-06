@@ -238,13 +238,22 @@ def plot_structure(
     linkages,
     ax,
     *,
+    style="paper",
     cmap="viridis",
     color_by="centroid_x",
-    face_alpha=0.88,
-    mesh_color=(0.0, 0.0, 0.0, 0.18),
-    mesh_linewidth=0.8,
-    boundary_color=(0.0, 0.0, 0.0, 0.85),
-    boundary_linewidth=2.2,
+    face_color=(0.30, 0.48, 0.66),
+    shade_strength=0.10,
+    light_dir=(1.0, 0.45),
+    face_alpha=None,
+    mesh_color=None,
+    mesh_linewidth=None,
+    boundary_color=None,
+    boundary_linewidth=None,
+    boundary_halo=None,
+    halo_color=(1.0, 1.0, 1.0, 0.85),
+    halo_width=2.4,
+    background=(1.0, 1.0, 1.0),
+    pad=0.03,
     show_nodes=False,
     node_size=8,
     node_color=(0.0, 0.0, 0.0, 0.55),
@@ -267,13 +276,22 @@ def plot_structure(
         ax (matplotlib.axes.Axes): Axes to draw on.
 
     Keyword args:
+        style (str): One of {"paper", "silhouette", "colormap"}.
         cmap (str): Matplotlib colormap name for quad fill colors.
         color_by (str): One of {"centroid_x", "centroid_y", "index", "radial"}.
+        face_color (color): Base fill color for styles that use a constant color.
+        shade_strength (float): Lighting strength for `style="paper"` (0 disables).
+        light_dir (tuple[float, float]): 2D light direction for paper shading.
         face_alpha (float): Alpha for filled quads.
         mesh_color (color): Color for internal mesh edges.
         mesh_linewidth (float): Line width for internal mesh edges.
         boundary_color (color): Color for outer boundary edges.
         boundary_linewidth (float): Line width for outer boundary edges.
+        boundary_halo (bool): If True, draw a soft halo under the boundary.
+        halo_color (color): Halo color (typically light/white).
+        halo_width (float): Extra line width added to the halo.
+        background (color | None): Axes background color.
+        pad (float): Axes margin fraction around the shape.
         show_nodes (bool): If True, scatter vertex positions.
         show_linkages (bool): If True, draw linkage perimeters (dashed).
         zorder (int): Base z-order for drawn artists.
@@ -311,27 +329,76 @@ def plot_structure(
         return
 
     centroids = polys.mean(axis=1)
-    if color_by == "centroid_x":
-        values = centroids[:, 0]
-    elif color_by == "centroid_y":
-        values = centroids[:, 1]
-    elif color_by == "index":
-        values = np.arange(len(polys), dtype=float)
-    elif color_by == "radial":
-        c0 = centroids.mean(axis=0)
-        values = np.linalg.norm(centroids - c0[None, :], axis=1)
-    else:
-        raise ValueError(f"Unknown color_by={color_by!r}")
 
-    vmin = float(values.min())
-    vmax = float(values.max())
-    norm = colors.Normalize(vmin=vmin, vmax=vmax if vmax > vmin else vmin + 1.0)
-    facecolors = cm.get_cmap(cmap)(norm(values))
-    facecolors[:, 3] = face_alpha
+    if background is not None:
+        ax.set_facecolor(background)
+
+    if style not in {"paper", "silhouette", "colormap"}:
+        raise ValueError(f"Unknown style={style!r}")
+
+    if face_alpha is None:
+        face_alpha = 0.92 if style == "paper" else (0.95 if style == "silhouette" else 0.88)
+
+    if style == "colormap":
+        if color_by == "centroid_x":
+            values = centroids[:, 0]
+        elif color_by == "centroid_y":
+            values = centroids[:, 1]
+        elif color_by == "index":
+            values = np.arange(len(polys), dtype=float)
+        elif color_by == "radial":
+            c0 = centroids.mean(axis=0)
+            values = np.linalg.norm(centroids - c0[None, :], axis=1)
+        else:
+            raise ValueError(f"Unknown color_by={color_by!r}")
+
+        vmin = float(values.min())
+        vmax = float(values.max())
+        norm = colors.Normalize(vmin=vmin, vmax=vmax if vmax > vmin else vmin + 1.0)
+        facecolors = cm.get_cmap(cmap)(norm(values))
+        facecolors[:, 3] = face_alpha
+
+    else:
+        # Flat fill with optional "paper" shading.
+        base_rgb = np.array(colors.to_rgb(face_color), dtype=float)
+        facecolors = np.tile(np.r_[base_rgb, face_alpha], (len(polys), 1))
+
+        if style == "paper" and float(shade_strength) > 0.0:
+            light = np.asarray(light_dir, dtype=float)
+            n = float(np.linalg.norm(light))
+            if n > 0.0:
+                light /= n
+                d = (centroids - centroids.mean(axis=0)) @ light
+                m = float(np.max(np.abs(d)))
+                if m > 0.0:
+                    s = d / m  # [-1, 1]
+                    t = np.clip(float(shade_strength) * s, -1.0, 1.0)[:, None]
+                    rgb = np.where(t >= 0.0, base_rgb + t * (1.0 - base_rgb), base_rgb * (1.0 + t))
+                    facecolors[:, :3] = np.clip(rgb, 0.0, 1.0)
 
     ax.add_collection(
         PolyCollection(polys, facecolors=facecolors, edgecolors="none", zorder=zorder)
     )
+
+    # Style defaults (only applied when not explicitly provided).
+    if mesh_color is None:
+        mesh_color = (
+            (0.12, 0.20, 0.30, 0.18)
+            if style in {"paper", "silhouette"}
+            else (0.0, 0.0, 0.0, 0.18)
+        )
+    if mesh_linewidth is None:
+        mesh_linewidth = 0.65 if style == "paper" else (0.0 if style == "silhouette" else 0.8)
+    if boundary_color is None:
+        boundary_color = (
+            (0.08, 0.16, 0.26, 0.88)
+            if style in {"paper", "silhouette"}
+            else (0.0, 0.0, 0.0, 0.9)
+        )
+    if boundary_linewidth is None:
+        boundary_linewidth = 2.4 if style in {"paper", "silhouette"} else 2.2
+    if boundary_halo is None:
+        boundary_halo = style in {"paper", "silhouette"}
 
     # Compute unique edges and classify them as boundary vs internal.
     edge_counts = {}
@@ -355,25 +422,35 @@ def plot_structure(
     boundary_keys = [e for e, c in edge_counts.items() if c == 1]
     internal_keys = [e for e, c in edge_counts.items() if c > 1]
 
-    internal_segments = _segments_for(internal_keys)
-    if internal_segments:
-        ax.add_collection(
-            LineCollection(
-                internal_segments,
-                colors=[mesh_color],
-                linewidths=mesh_linewidth,
-                zorder=zorder + 1,
+    if float(mesh_linewidth) > 0.0:
+        internal_segments = _segments_for(internal_keys)
+        if internal_segments:
+            ax.add_collection(
+                LineCollection(
+                    internal_segments,
+                    colors=[mesh_color],
+                    linewidths=mesh_linewidth,
+                    zorder=zorder + 1,
+                )
             )
-        )
 
     boundary_segments = _segments_for(boundary_keys)
     if boundary_segments:
+        if boundary_halo and float(boundary_linewidth) > 0.0 and float(halo_width) > 0.0:
+            ax.add_collection(
+                LineCollection(
+                    boundary_segments,
+                    colors=[halo_color],
+                    linewidths=float(boundary_linewidth) + float(halo_width),
+                    zorder=zorder + 2,
+                )
+            )
         ax.add_collection(
             LineCollection(
                 boundary_segments,
                 colors=[boundary_color],
                 linewidths=boundary_linewidth,
-                zorder=zorder + 2,
+                zorder=zorder + 3,
             )
         )
 
@@ -413,6 +490,8 @@ def plot_structure(
         )
 
     ax.autoscale_view()
+    if pad is not None and float(pad) > 0.0:
+        ax.margins(float(pad))
     ax.set_aspect("equal")
     ax.axis("off")
 
