@@ -118,6 +118,7 @@ def show_samples(
 
     plt.tight_layout()
     plt.savefig("shape_and_mask_samples.png", dpi=300)
+    print("Saved shape and mask samples to shape_and_mask_samples.png")
 
 
 if __name__ == "__main__":
