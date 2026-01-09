@@ -13,3 +13,4 @@ demo_*.py
 *.npz
 *.npy
 *.svg
+notebooks/
