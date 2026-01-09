@@ -9,12 +9,7 @@ from kirigami.utils import find_invalid_quads
 
 from concurrent.futures import ThreadPoolExecutor
 
-try:
-    from scipy.stats import qmc as _qmc
-
-    _HAVE_SCIPY = True
-except Exception:
-    _HAVE_SCIPY = False
+from scipy.stats import qmc as _qmc
 
 
 # ----------------------------
@@ -125,9 +120,7 @@ def _make_u_batches(
     if method not in {"sobol", "sobol_base2", "lhs", "halton", "random"}:
         method = "sobol" if use_sobol else "random"
 
-    if method == "random" or (not _HAVE_SCIPY and method != "random"):
-        if method != "random" and not _HAVE_SCIPY:
-            print(f"[WARN] SciPy not found; falling back to 'random' for method='{method}'.")
+    if method == "random" or method != "random":
         u = _fallback_random()
     elif method == "sobol":
         sampler = _qmc.Sobol(d=dim, scramble=True, seed=seed)
