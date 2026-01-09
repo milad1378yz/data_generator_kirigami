@@ -208,7 +208,7 @@ def show_dataset_samples(
 
 def main():
     parser = argparse.ArgumentParser(description="Quick dataset sampler and visualizer")
-    parser.add_argument("--data", default="kirigami_dataset3.pkl", help="Path to dataset .pkl")
+    parser.add_argument("--data", default="kirigami_dataset.pkl", help="Path to dataset .pkl")
     parser.add_argument(
         "--split", default="train", choices=["train", "valid"], help="Split to sample"
     )

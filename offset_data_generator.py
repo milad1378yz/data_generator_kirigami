@@ -1,5 +1,6 @@
 import numpy as np
 import pickle
+from collections import deque
 from matplotlib.path import Path
 from tqdm import tqdm
 
@@ -34,7 +35,13 @@ EPS_MIN = -0.90  # narrowed/biased range to match best-performing random sweeps
 EPS_MAX = 1.20  # narrowed/biased range to match best-performing random sweeps
 EPS_SCALE = "linear"  # keep linear mapping (matches latest sweep)
 NUM_WORKERS = 40  # do multi threading for the loop of generation (None -> let Python decide)
-MAX_OVERLAP_RATIO = 0.02  # reject samples with >10% area overlap between quads
+MAX_OVERLAP_RATIO = 0.02  # reject samples with >2% area overlap between quads
+
+# mask topology guards
+MASK_MIN_FILL = 0.03  # reject masks that are too sparse
+MASK_MAX_FILL = 0.97  # reject masks that fill almost the whole image
+MASK_MAX_SECONDARY_COMPONENT_RATIO = 0.005  # allow tiny stray components
+MASK_MAX_HOLE_RATIO = 0.005  # allow tiny holes due to rasterization
 
 
 # ----------------------------
@@ -258,6 +265,106 @@ def _estimate_overlap_ratio(points, quads, mask, out_h, out_w):
     return ratio
 
 
+def _connected_component_areas(binary_mask):
+    """Return list of connected component areas for a 2D bool mask (4-connectivity)."""
+    h, w = binary_mask.shape
+    visited = np.zeros_like(binary_mask, dtype=bool)
+    areas = []
+    for r in range(h):
+        for c in range(w):
+            if not binary_mask[r, c] or visited[r, c]:
+                continue
+            q = deque([(r, c)])
+            visited[r, c] = True
+            area = 0
+            while q:
+                rr, cc = q.popleft()
+                area += 1
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nr, nc = rr + dr, cc + dc
+                    if (
+                        0 <= nr < h
+                        and 0 <= nc < w
+                        and binary_mask[nr, nc]
+                        and not visited[nr, nc]
+                    ):
+                        visited[nr, nc] = True
+                        q.append((nr, nc))
+            areas.append(area)
+    return areas
+
+
+def _hole_area_ratio(binary_mask):
+    """Compute total hole area ratio (background not connected to border)."""
+    solid = binary_mask
+    h, w = solid.shape
+    visited = np.zeros_like(solid, dtype=bool)
+    q = deque()
+
+    # Seed BFS with background pixels on the border
+    for c in range(w):
+        if not solid[0, c]:
+            visited[0, c] = True
+            q.append((0, c))
+        if not solid[h - 1, c] and not visited[h - 1, c]:
+            visited[h - 1, c] = True
+            q.append((h - 1, c))
+    for r in range(h):
+        if not solid[r, 0] and not visited[r, 0]:
+            visited[r, 0] = True
+            q.append((r, 0))
+        if not solid[r, w - 1] and not visited[r, w - 1]:
+            visited[r, w - 1] = True
+            q.append((r, w - 1))
+
+    while q:
+        rr, cc = q.popleft()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nr, nc = rr + dr, cc + dc
+            if (
+                0 <= nr < h
+                and 0 <= nc < w
+                and (not solid[nr, nc])
+                and (not visited[nr, nc])
+            ):
+                visited[nr, nc] = True
+                q.append((nr, nc))
+
+    holes = (~solid) & (~visited)
+    if not holes.any():
+        return 0.0
+    return float(holes.sum()) / float(h * w)
+
+
+def _validate_mask_topology(
+    mask: np.ndarray,
+    min_fill: float = MASK_MIN_FILL,
+    max_fill: float = MASK_MAX_FILL,
+    max_secondary_ratio: float = MASK_MAX_SECONDARY_COMPONENT_RATIO,
+    max_hole_ratio: float = MASK_MAX_HOLE_RATIO,
+):
+    """Check mask topology to keep shapes visually sane and aligned."""
+    solid = mask > 0.5
+    fill_ratio = float(solid.mean())
+    if fill_ratio < min_fill or fill_ratio > max_fill:
+        return False, f"fill ratio {fill_ratio:.2%}"
+
+    areas = _connected_component_areas(solid)
+    if not areas:
+        return False, "empty mask"
+    areas.sort(reverse=True)
+    if len(areas) > 1:
+        secondary_ratio = float(sum(areas[1:])) / float(areas[0])
+        if secondary_ratio > max_secondary_ratio:
+            return False, f"multi-component ratio {secondary_ratio:.2%}"
+
+    hole_ratio = _hole_area_ratio(solid)
+    if hole_ratio > max_hole_ratio:
+        return False, f"hole ratio {hole_ratio:.2%}"
+
+    return True, None
+
+
 def _make_one_sample(
     grid_rows,
     grid_cols,
@@ -356,6 +463,12 @@ def _make_one_sample(
             f"[warn] Discarding sample due to overlap ratio {overlap_ratio:.2%} (> {MAX_OVERLAP_RATIO:.0%})",
             flush=True,
         )
+        return None
+
+    # Topology sanity check to keep masks aligned and visually coherent
+    ok, reason = _validate_mask_topology(silhouette_mask)
+    if not ok:
+        print(f"[warn] Discarding sample due to mask topology ({reason})", flush=True)
         return None
 
     # 8) add channel dimension, ensure float32
